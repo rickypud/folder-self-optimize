@@ -1,117 +1,149 @@
 # Folder Self Optimize
 
-一個給 `Codex` 用的封閉式自我優化器。
+`Folder Self Optimize` is a closed-loop optimizer for `Codex`.
 
-白話版：你丟一個資料夾給它，它先把這個資料夾「鎖住」，然後每次只做一小輪修改。  
-每輪都會：
+Give it an existing folder, lock the file set, define a verification gate, optionally define a scoring command, and let it iterate in bounded keep-or-discard loops.
 
-1. 在影子工作區改 code
-2. 跑你指定的測試
-3. 跑你指定的評分
-4. 比現在版本好就保留
-5. 沒變好就整輪丟掉
+中文補充：它不是放任 AI 亂改，而是把 AI 關進一個小籠子裡，一輪一輪試，變好才保留，沒變好就回退。
 
-所以它不是「放任 AI 亂改」，而是「讓 AI 在籠子裡做小步優化」。
+## What It Does
 
-靈感來自 `karpathy/autoresearch`，但這個版本不是只改單一檔案，而是能鎖整個資料夾。
+For each iteration, it will:
 
-## 它適合做什麼
+1. Create a shadow workspace from the current accepted baseline.
+2. Ask Codex to make one bounded mutation.
+3. Reject changes that add files, delete files, touch protected files, or exceed diff limits.
+4. Run your verification commands in another shadow workspace.
+5. Run your scoring command if you provided one.
+6. Keep the candidate only if it is strictly better.
+7. Roll back everything else automatically.
 
-- 優化既有程式碼
-- 清理重複與死碼
-- 在固定測試和固定分數下做小步迭代
-- 當你的 Codex skill 使用
+The real target folder stays untouched until a candidate is accepted.
 
-## 它不適合做什麼
+中文補充：真正的資料夾預設不直接被測試和亂改，只有 `keep` 的版本才會寫回去。
 
-- 幫你從 0 生一個大專案
-- 沒有測試也沒有評分，卻想要它自動變神
-- 放給它隨便加檔案、加依賴、改架構
+## What It Is Good For
 
-## 它到底怎麼保護你
+- Iterative cleanup of an existing code folder
+- Safe-ish autonomous improvement under a fixed test gate
+- Small, repeated refactors with rollback
+- Codex skill workflows
 
-- 不准新增檔案
-- 不准刪除檔案
-- 不准偷改常見依賴檔和控制檔
-- 不准默默吸收你手動改出來的 drift
-- 真正目錄預設不直接改
-- 每輪先在影子工作區驗證
-- 只有 `keep` 才寫回真實資料夾
-- 如果 apply 中途 crash，下次啟動先恢復
-- 同一個資料夾同時只允許一個 optimizer 在跑
+## What It Is Not Good For
 
-## 先決條件
+- Generating an entire large project from scratch
+- Optimizing without meaningful tests or metrics
+- Unbounded architectural exploration
+- Production governance by itself
+
+中文補充：如果你沒有像樣的 `verify` 和 `metric`，它最多只會學會「過測試 + 變短」，不會神奇地學會你的真正目標。
+
+## Core Safety Model
+
+- No new files
+- No deleted files
+- Protected dependency and control files are blocked by default
+- Drift is not silently absorbed
+- One optimizer process per target folder
+- Crash-safe apply markers
+- Shadow-workspace verification
+- Automatic keep or rollback
+
+## Requirements
 
 - Python 3.10+
-- 本機已安裝 `codex`
-- `codex login` 已完成
-- 你手上有一個「現成資料夾」
-- 你至少有一個像樣的 `--verify`
-- 最好再有一個 `--metric-command`
+- `codex` installed locally
+- `codex login` already completed
+- An existing target folder
+- At least one useful `--verify` command
+- Preferably a real `--metric-command`
 
-## 3 分鐘上手
+## Quick Start
 
-### 1. 先看目前狀態
+### 1. Inspect the current lock state
 
 ```bash
-python3 scripts/folder_self_optimize.py status /path/to/your/project
+python3 scripts/folder_self_optimize.py status /path/to/project
 ```
 
-### 2. 先只看它準備怎麼改
+### 2. Preview the next mutation prompt
 
 ```bash
-python3 scripts/folder_self_optimize.py prompt /path/to/your/project
+python3 scripts/folder_self_optimize.py prompt /path/to/project
 ```
 
-### 3. 跑 3 輪最基本閉環
+### 3. Run a small loop
 
 ```bash
-python3 scripts/folder_self_optimize.py run /path/to/your/project \
+python3 scripts/folder_self_optimize.py run /path/to/project \
   --verify "pytest -q" \
   --iterations 3
 ```
 
-這樣的效果是：
-- 測試要過
-- 結構要更簡單
-- 沒變好就 rollback
+This means:
 
-## 真正有用的跑法
+- tests must pass
+- the code should get simpler
+- non-improving candidates are discarded
 
-如果你只給測試，它只會學會：
+中文補充：這是最基本版閉環，但還不夠強。真正有用的版本通常要再加一個評分命令。
 
-`通過測試 + 盡量更短更簡單`
+## Real-World Usage
 
-這通常不夠。
-
-真正好的跑法是再加一個評分命令：
+### Basic loop
 
 ```bash
-python3 scripts/folder_self_optimize.py run /path/to/your/project \
+python3 scripts/folder_self_optimize.py run /path/to/project \
+  --verify "pytest -q" \
+  --iterations 5
+```
+
+### Better loop with a custom metric
+
+```bash
+python3 scripts/folder_self_optimize.py run /path/to/project \
   --verify "pytest -q" \
   --metric-command "python3 eval_candidate.py" \
   --iterations 5
 ```
 
-你的 `eval_candidate.py` 可以輸出：
-
-```json
-{"score": 0.82}
-```
-
-如果分數越低越好：
+### Lower-is-better metric
 
 ```bash
-python3 scripts/folder_self_optimize.py run /path/to/your/project \
+python3 scripts/folder_self_optimize.py run /path/to/project \
   --verify "pytest -q" \
   --metric-command "python3 eval_candidate.py" \
   --metric-direction lower-is-better \
   --iterations 5
 ```
 
-## 更強的評分寫法：可以直接否決
+### Stop early when the loop is clearly stuck
 
-如果你不只要分數，還想要「某些條件一踩線就直接淘汰」，輸出 JSON：
+```bash
+python3 scripts/folder_self_optimize.py run /path/to/project \
+  --verify "pytest -q" \
+  --metric-command "python3 eval_candidate.py" \
+  --iterations 20 \
+  --max-no-improve-streak 5
+```
+
+中文補充：`--max-no-improve-streak` 的意思是「連續 5 輪都沒進步就收工」，避免空轉。
+
+## Metric Output Formats
+
+### Plain numeric output
+
+```json
+0.82
+```
+
+### JSON with a score
+
+```json
+{"score": 0.82}
+```
+
+### JSON with hard veto
 
 ```json
 {
@@ -121,7 +153,7 @@ python3 scripts/folder_self_optimize.py run /path/to/your/project \
 }
 ```
 
-或：
+### JSON with multi-objective constraints
 
 ```json
 {
@@ -133,32 +165,34 @@ python3 scripts/folder_self_optimize.py run /path/to/your/project \
 }
 ```
 
-這樣它就不會只看單一分數，而是會被硬性條件攔下來。
+If any veto or failed constraint appears, the candidate is rejected even if the score looks better.
 
-## 常用命令
+中文補充：這就是避免 reward hacking 的關鍵。不要只給單一分數，能 veto 的條件越多越穩。
+
+## Commands
 
 ### `status`
 
-看目前鎖住了哪些檔、基線分數是多少、資料夾有沒有 drift。
+Show the current baseline, verification setup, and whether the real target folder drifted.
 
 ```bash
-python3 scripts/folder_self_optimize.py status /path/to/your/project
+python3 scripts/folder_self_optimize.py status /path/to/project
 ```
 
 ### `prompt`
 
-只印出下一輪 mutation prompt，不真的執行。
+Print the next bounded Codex mutation prompt without actually running Codex.
 
 ```bash
-python3 scripts/folder_self_optimize.py prompt /path/to/your/project
+python3 scripts/folder_self_optimize.py prompt /path/to/project
 ```
 
 ### `run`
 
-真的跑閉環。
+Run the full closed loop.
 
 ```bash
-python3 scripts/folder_self_optimize.py run /path/to/your/project \
+python3 scripts/folder_self_optimize.py run /path/to/project \
   --verify "pytest -q" \
   --metric-command "python3 eval_candidate.py" \
   --iterations 5
@@ -166,53 +200,70 @@ python3 scripts/folder_self_optimize.py run /path/to/your/project \
 
 ### `restore`
 
-把資料夾還原回目前記錄的 baseline。
+Restore the target folder back to the saved baseline.
 
 ```bash
-python3 scripts/folder_self_optimize.py restore /path/to/your/project
+python3 scripts/folder_self_optimize.py restore /path/to/project
 ```
 
-## 如果它拒絕跑，通常是這幾種原因
+### `report`
 
-### 1. 你的資料夾已經 drift 了
-
-意思是：你手動改過、或上次殘留了東西，現在和基線不一致。
-
-解法只有兩種：
+Render a human-readable summary of the current baseline and recent loop history.
 
 ```bash
-python3 scripts/folder_self_optimize.py restore /path/to/your/project
+python3 scripts/folder_self_optimize.py report /path/to/project
 ```
 
-或你很確定現在這版要當新起點：
+Write the report to a file:
 
 ```bash
-python3 scripts/folder_self_optimize.py run /path/to/your/project \
+python3 scripts/folder_self_optimize.py report /path/to/project \
+  --output /tmp/fso-report.md
+```
+
+中文補充：`report` 是給人看的，不是給模型看的。你可以很快知道它最近到底是在進步，還是在白跑。
+
+## Common Failure Cases
+
+### 1. The target folder drifted
+
+You changed files manually, or a previous run left the folder different from the stored baseline.
+
+Fix it by restoring:
+
+```bash
+python3 scripts/folder_self_optimize.py restore /path/to/project
+```
+
+Or explicitly accept the current tree as the new starting point:
+
+```bash
+python3 scripts/folder_self_optimize.py run /path/to/project \
   --verify "pytest -q" \
   --rebaseline
 ```
 
-### 2. 你選的資料夾太大
+### 2. The target folder is too large
 
-不要一上來就鎖整個 monorepo。  
-先鎖最小可工作的子目錄。
+Do not start with an entire monorepo if you can avoid it. Lock the smallest useful subtree first.
 
-### 3. 你的測試根本不代表品質
+### 3. The tests do not represent quality
 
-如果測試太弱，它就只會學會鑽測試漏洞。  
-這不是工具壞掉，是你的 gate 太弱。
+If your tests are weak, the loop will optimize toward weak tests.
 
-## 建議你這樣用
+中文補充：不是工具壞，是 gate 太弱。
 
-### 最保守
+## Recommended Operating Modes
+
+### Conservative
 
 ```bash
 python3 scripts/folder_self_optimize.py prompt /path/to/project
 ```
 
-先看 prompt，自己決定要不要放行。
+Preview the prompt first.
 
-### 一般安全版
+### Safe default
 
 ```bash
 python3 scripts/folder_self_optimize.py run /path/to/project \
@@ -220,34 +271,33 @@ python3 scripts/folder_self_optimize.py run /path/to/project \
   --iterations 3
 ```
 
-### 生產級
+### Stronger production-style loop
 
 ```bash
 python3 scripts/folder_self_optimize.py run /path/to/project \
   --verify "pytest -q" \
   --verify "python3 smoke_test.py" \
   --metric-command "python3 score_candidate.py" \
-  --iterations 5 \
+  --iterations 8 \
   --touch-limit 2 \
-  --net-line-limit 80
+  --net-line-limit 80 \
+  --max-no-improve-streak 4
 ```
 
-## 當成 Codex Skill 安裝
-
-如果你要把它加進 `~/.codex/skills`：
+## Use It as a Codex Skill
 
 ```bash
 mkdir -p ~/.codex/skills
 ln -s "$(pwd)" ~/.codex/skills/folder-self-optimize
 ```
 
-之後你就可以在 Codex 裡叫它：
+Then invoke it from Codex with:
 
 ```text
 Use $folder-self-optimize to lock this folder and run a bounded self-optimization loop.
 ```
 
-## Repo 結構
+## Repository Layout
 
 ```text
 .
@@ -260,9 +310,23 @@ Use $folder-self-optimize to lock this folder and run a bounded self-optimizatio
     └── folder_self_optimize.py
 ```
 
-## 最重要的一句
+## Origin
 
-它不是自動賺錢機。  
-它只是把 AI 的改動壓進一個更硬、更可回滾、更可評估的閉環裡。
+This project is inspired by `karpathy/autoresearch`, but adapted from:
 
-你給的 `verify` 和 `metric` 越真實，它就越像一個有用的 agentic loop。
+- one editable file
+- one metric
+
+to:
+
+- one locked folder
+- multiple verification commands
+- optional multi-objective scoring
+- crash-safe keep or rollback semantics
+
+## The One Sentence Version
+
+This is not a magic money machine.  
+It is a stricter, more recoverable, more measurable loop for AI-driven code mutation.
+
+中文總結：它不是保證成功，它只是把 AI 改 code 這件事，收斂成一個比較不容易失控的閉環。

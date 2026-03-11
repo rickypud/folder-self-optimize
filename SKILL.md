@@ -100,9 +100,13 @@ python3 scripts/folder_self_optimize.py run train_loop \
   - verify and score the candidate in a shadow copy, not the real target folder
   - write back to the real target folder only when the candidate is accepted
   - leave a recovery marker if a crash happens during apply
+  - optionally stop early when the no-improvement streak hits `--max-no-improve-streak`
 
 `restore`
 - Put the folder back to the saved baseline immediately.
+
+`report`
+- Render a human-readable summary of the baseline, drift, and recent keep/discard history.
 
 ## Guardrails
 

@@ -27,6 +27,7 @@ SNAPSHOT_DIRNAME = "baseline"
 STATE_FILENAME = "state.json"
 JOURNAL_FILENAME = "journal.jsonl"
 PROMPT_FILENAME = "last_prompt.md"
+REPORT_FILENAME = "latest_report.md"
 LOCK_FILENAME = "process.lock"
 SESSION_FILENAME = "active_run.json"
 WORKSPACES_DIRNAME = "workspaces"
@@ -642,11 +643,7 @@ def human_file_list(locked_files: list[dict[str, Any]], limit: int = 200) -> str
 
 
 def recent_journal_summary(state_dir: Path, limit: int = 6) -> str:
-    path = state_dir / JOURNAL_FILENAME
-    if not path.exists():
-        return "- none"
-    lines = path.read_text(encoding="utf-8").splitlines()
-    entries = [json.loads(line) for line in lines if line.strip()]
+    entries = load_journal_entries(state_dir)
     if not entries:
         return "- none"
     summary_lines: list[str] = []
@@ -659,6 +656,126 @@ def recent_journal_summary(state_dir: Path, limit: int = 6) -> str:
             f"{changed_label} | {entry.get('reason', 'no reason')}"
         )
     return "\n".join(summary_lines)
+
+
+def load_journal_entries(state_dir: Path) -> list[dict[str, Any]]:
+    path = state_dir / JOURNAL_FILENAME
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def format_score(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.3f}"
+
+
+def render_report(state: dict[str, Any], max_entries: int = 12) -> str:
+    state_dir = Path(state["state_dir"])
+    baseline = state.get("baseline")
+    drift = drift_details(state)
+    entries = load_journal_entries(state_dir)
+    keeps = [entry for entry in entries if entry.get("accepted")]
+    discards = [entry for entry in entries if not entry.get("accepted")]
+    lines = [
+        "# Folder Self Optimize Report",
+        "",
+        "English summary first. Chinese notes are kept short under each section.",
+        "",
+        "## Scope",
+        f"- Target: `{state['target_dir']}`",
+        f"- Locked files: `{len(state['locked_files'])}`",
+        f"- Protected files: `{len(state['protected_files'])}`",
+        f"- Verify commands: `{len(state['verify_commands'])}`",
+        f"- Metric command: `{state.get('metric_command') or 'none'}`",
+        "",
+        "CN: 這裡是在說它現在鎖住哪個資料夾、驗證方式是什麼、目前是不是有自定義評分。",
+        "",
+        "## Baseline",
+    ]
+    if baseline:
+        lines.extend(
+            [
+                f"- Verification: `{'pass' if baseline['verify_success'] else 'fail'}`",
+                f"- Score: `{baseline['score']:.3f}`",
+                f"- Score source: `{baseline['score_source']}`",
+                f"- Static score: `{baseline['static_score']:.3f}`",
+                f"- Metric score: `{format_score(baseline.get('metric_score'))}`",
+            ]
+        )
+    else:
+        lines.append("- Baseline has not been computed yet.")
+    lines.extend(
+        [
+            "",
+            "CN: baseline 就是目前被接受的版本，不是最後一次嘗試的版本。",
+            "",
+            "## Drift",
+            f"- Modified: `{len(drift['modified'])}`",
+            f"- Added: `{len(drift['added'])}`",
+            f"- Deleted: `{len(drift['deleted'])}`",
+        ]
+    )
+    if drift["modified"]:
+        lines.append(f"- Sample modified paths: `{', '.join(drift['modified'][:5])}`")
+    if drift["added"]:
+        lines.append(f"- Sample added paths: `{', '.join(drift['added'][:5])}`")
+    if drift["deleted"]:
+        lines.append(f"- Sample deleted paths: `{', '.join(drift['deleted'][:5])}`")
+    lines.extend(
+        [
+            "",
+            "CN: drift 不等於壞掉，只代表現在目錄和記錄中的 baseline 不一致。",
+            "",
+            "## Loop History",
+            f"- Total iterations logged: `{len(entries)}`",
+            f"- Keeps: `{len(keeps)}`",
+            f"- Discards: `{len(discards)}`",
+        ]
+    )
+    if entries:
+        lines.extend(["", "### Recent iterations"])
+        for entry in entries[-max_entries:]:
+            changed = entry.get("guard_details", {}).get("modified", [])
+            changed_label = ", ".join(changed[:3]) if changed else "no source change"
+            lines.append(
+                f"- iter `{entry.get('iteration')}` | "
+                f"`{'keep' if entry.get('accepted') else 'discard'}` | "
+                f"`{changed_label}` | {entry.get('reason', 'no reason')}"
+            )
+    else:
+        lines.append("- No iterations have been logged yet.")
+    lines.extend(
+        [
+            "",
+            "CN: 看 `keep/discard` 和 reason，通常就能知道它到底是在進步，還是在原地打轉。",
+        ]
+    )
+    if keeps:
+        last_keep = keeps[-1]
+        candidate = last_keep.get("candidate", {})
+        lines.extend(
+            [
+                "",
+                "## Last Accepted Candidate",
+                f"- Iteration: `{last_keep.get('iteration')}`",
+                f"- Score: `{format_score(candidate.get('score'))}`",
+                f"- Verification: `{'pass' if candidate.get('verify_success') else 'fail'}`",
+                f"- Reason: {last_keep.get('reason', 'n/a')}",
+                "",
+                "CN: 這是最後一次真的寫回目標資料夾的候選版本。",
+            ]
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_report(state: dict[str, Any], output_path: Path | None = None) -> Path:
+    state_dir = Path(state["state_dir"])
+    path = output_path or (state_dir / REPORT_FILENAME)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_report(state), encoding="utf-8")
+    return path
 
 
 def build_prompt(state: dict[str, Any], baseline: Evaluation, iteration: int) -> str:
@@ -959,7 +1076,22 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_restore(args: argparse.Namespace) -> int:
     state = init_or_load_state(args)
     restore_baseline(state)
+    write_report(state)
     print(f"Restored baseline for {state['target_dir']}")
+    return 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    state = init_or_load_state(args)
+    if not state.get("baseline"):
+        evaluation = evaluate_target(state)
+        refresh_baseline(state, evaluation)
+    output_path = Path(args.output).expanduser().resolve() if args.output else None
+    report_path = write_report(state, output_path=output_path)
+    if args.output:
+        print(f"Wrote report to {report_path}")
+    else:
+        print(report_path.read_text(encoding="utf-8"), end="")
     return 0
 
 
@@ -989,12 +1121,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     write_session(state_dir, run_session)
     baseline_data = state.get("baseline")
     completed_cleanly = False
+    no_improve_streak = 0
     try:
         if baseline_data is None or args.rebaseline:
             baseline_eval = evaluate_target(state)
             refresh_baseline(state, baseline_eval)
         else:
             baseline_eval = Evaluation(**baseline_data)
+        write_report(state)
         if args.iterations == 0:
             print_status(state)
             completed_cleanly = True
@@ -1075,17 +1209,27 @@ def cmd_run(args: argparse.Namespace) -> int:
                     apply_workspace_to_target(state, workspace_dir)
                     baseline_eval = candidate_eval
                     refresh_baseline(state, baseline_eval, source_dir=workspace_dir)
+                    no_improve_streak = 0
                     apply_started = False
                     run_session["applying"] = False
                     run_session["workspace_dir"] = None
                     write_session(state_dir, run_session)
+                else:
+                    no_improve_streak += 1
                 append_journal(state_dir, journal_entry)
+                write_report(state)
                 status = "keep" if accept else "discard"
                 print(
                     f"[{status}] iteration={iteration} "
                     f"baseline={baseline_eval.score:.3f} candidate={candidate_eval.score:.3f} "
                     f"reason={reason}"
                 )
+                if args.max_no_improve_streak and no_improve_streak >= args.max_no_improve_streak:
+                    print(
+                        f"[stop] no improvement streak reached {no_improve_streak} "
+                        f"(limit={args.max_no_improve_streak})"
+                    )
+                    break
             finally:
                 remove_workspace(workspace_dir)
                 if not apply_started:
@@ -1146,6 +1290,10 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Recompute the baseline from current contents before iterating.",
     )
+    parser.add_argument(
+        "--output",
+        help="Optional output path for report-related commands.",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1160,6 +1308,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit the next codex prompt and exit without invoking codex.",
     )
+    run_parser.add_argument(
+        "--max-no-improve-streak",
+        type=int,
+        default=0,
+        help="Stop early after this many consecutive non-improving iterations. 0 disables the stop condition.",
+    )
     run_parser.set_defaults(func=cmd_run)
 
     status_parser = subparsers.add_parser("status", help="Show the current lock and baseline.")
@@ -1173,6 +1327,10 @@ def build_parser() -> argparse.ArgumentParser:
     restore_parser = subparsers.add_parser("restore", help="Restore the saved baseline.")
     add_common_args(restore_parser)
     restore_parser.set_defaults(func=cmd_restore)
+
+    report_parser = subparsers.add_parser("report", help="Render a human-readable loop report.")
+    add_common_args(report_parser)
+    report_parser.set_defaults(func=cmd_report)
 
     return parser
 
