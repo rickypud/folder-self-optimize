@@ -1,0 +1,4 @@
+interface:
+  display_name: "Folder Self Optimize"
+  short_description: "Lock folders and run bounded optimization loops"
+  default_prompt: "Use $folder-self-optimize to lock this folder and run a bounded self-optimization loop."
